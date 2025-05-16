@@ -1,5 +1,17 @@
 use crate::bindings::*;
 use alloc::{ffi::CString, vec::Vec};
+use bitflags::bitflags;
+
+bitflags! {
+    /// File timestamp flags
+    #[derive(Clone, Copy, Debug)]
+    pub struct TimestampFlags: u8 {
+        const ATIME = 0b001;
+        const MTIME = 0b010;
+        const CTIME = 0b100;
+        const ALL = Self::ATIME.bits() | Self::MTIME.bits() | Self::CTIME.bits();
+    }
+}
 
 // Ext4File文件操作与block device设备解耦了
 pub struct Ext4File {
@@ -432,6 +444,84 @@ impl Ext4File {
         }
 
         Ok((name, inode_type))
+    }
+
+    /// Get file timestamps based on provided flags
+    pub fn time_get(&self, path: &str, flags: TimestampFlags) -> Result<(u32, u32, u32), i32> {
+        let mut atime: u32 = 0;
+        let mut mtime: u32 = 0;
+        let mut ctime: u32 = 0;
+        
+        let c_path = CString::new(path).expect("CString::new failed");
+        let c_path = c_path.into_raw();
+        
+        type TimestampGetFn = unsafe extern "C" fn(*const ::core::ffi::c_char, *mut u32) -> ::core::ffi::c_int;
+        
+        let atime_fn: TimestampGetFn = ext4_atime_get;
+        let mtime_fn: TimestampGetFn = ext4_mtime_get;
+        let ctime_fn: TimestampGetFn = ext4_ctime_get;
+        
+        let operations = [
+            (TimestampFlags::ATIME, atime_fn, &mut atime as *mut u32),
+            (TimestampFlags::MTIME, mtime_fn, &mut mtime as *mut u32),
+            (TimestampFlags::CTIME, ctime_fn, &mut ctime as *mut u32),
+        ];
+        
+        let result = operations.iter()
+            .filter(|(flag, _, _)| flags.contains(*flag))
+            .map(|(_, func, dest)| unsafe { func(c_path, *dest) })
+            .find(|&r| r != EOK as i32)
+            .unwrap_or(EOK as i32);
+        
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        
+        trace!("time set TimestampFlags: {:?}, value: ({:?})", flags, (atime, mtime, ctime));
+        if result != EOK as i32 {
+            error!("time_get failed: rc = {}", result);
+            Err(result)
+        } else {
+            Ok((atime, mtime, ctime))
+        }
+    }
+
+    /// Set file timestamps based on provided flags and values
+    pub fn time_set(&mut self, path: &str, flags: TimestampFlags, values: (u32, u32, u32)) -> Result<usize, i32> {
+        trace!("time set TimestampFlags: {:?}, value: {:?}", flags, values);
+        let (atime, mtime, ctime) = values;
+
+        let c_path = CString::new(path).expect("CString::new failed");
+        let c_path = c_path.into_raw();
+        
+        type TimestampSetFn = unsafe extern "C" fn(*const ::core::ffi::c_char, u32) -> ::core::ffi::c_int;
+        
+        let atime_fn: TimestampSetFn = ext4_atime_set;
+        let mtime_fn: TimestampSetFn = ext4_mtime_set;
+        let ctime_fn: TimestampSetFn = ext4_ctime_set;
+        
+        let operations = [
+            (TimestampFlags::ATIME, atime_fn, atime),
+            (TimestampFlags::MTIME, mtime_fn, mtime),
+            (TimestampFlags::CTIME, ctime_fn, ctime),
+        ];
+        
+        let result = operations.iter()
+            .filter(|(flag, _, _)| flags.contains(*flag))
+            .map(|(_, func, value)| unsafe { func(c_path, *value) })
+            .find(|&r| r != EOK as i32)
+            .unwrap_or(EOK as i32);
+        
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        
+        if result != EOK as i32 {
+            error!("time_set failed: rc = {}", result);
+            Err(result)
+        } else {
+            Ok(EOK as usize)
+        }
     }
 }
 
